@@ -1,10 +1,16 @@
 from flask import Flask, request, jsonify
 import pickle
 import numpy as np
+import requests
 from flask_cors import CORS
 
 app = Flask(__name__)
 CORS(app)
+
+# ==============================
+# 🔑 API KEY (ONLY ONE PLACE)
+# ==============================
+API_KEY = "YOUR_REAL_API_KEY_HERE"
 
 # ==============================
 # LOAD MODELS
@@ -76,13 +82,11 @@ def predict_fertilizer():
     try:
         data = request.json
 
-        # Validate
         required = ["temperature", "humidity", "moisture", "soil_type", "crop_type", "N", "P", "K"]
         for f in required:
             if f not in data:
                 return jsonify({"error": f"Missing {f}"}), 400
 
-        # Encode
         soil = le_soil.transform([data["soil_type"]])[0]
         crop = le_crop.transform([data["crop_type"]])[0]
 
@@ -97,11 +101,21 @@ def predict_fertilizer():
             float(data["P"])
         ]]
 
-        pred = fert_model.predict(features)
-        fertilizer = le_fert.inverse_transform(pred)[0]
+        probs = fert_model.predict_proba(features)[0]
+        top_indices = np.argsort(probs)[-3:][::-1]
+
+        top_ferts = le_fert.inverse_transform(top_indices)
+        top_probs = probs[top_indices]
+
+        results = []
+        for fert, prob in zip(top_ferts, top_probs):
+            results.append({
+                "fertilizer": fert,
+                "confidence": round(float(prob) * 100, 2)
+            })
 
         return jsonify({
-            "recommended_fertilizer": fertilizer,
+            "top_3_fertilizers": results,
             "status": "success"
         })
 
@@ -110,63 +124,60 @@ def predict_fertilizer():
 
 
 # ==============================
-# 🔥 COMBINED (OPTIONAL)
+# 💰 MANDI PRICE FUNCTION
 # ==============================
-@app.route("/predict_all", methods=["POST"])
-def predict_all():
+def get_mandi_price(crop, state):
+    url = "https://api.data.gov.in/resource/9ef84268-d588-465a-a308-a864a43d0070"
+
+    params = {
+        "api-key": API_KEY,
+        "format": "json",
+        "limit": 5,
+        "filters[commodity]": crop,
+        "filters[state]": state
+    }
+
+    response = requests.get(url, params=params)
+    data = response.json()
+
+    if "records" in data and len(data["records"]) > 0:
+        record = data["records"][0]
+
+        return {
+            "crop": record.get("commodity"),
+            "state": record.get("state"),
+            "market": record.get("market"),
+            "min_price": record.get("min_price"),
+            "max_price": record.get("max_price"),
+            "modal_price": record.get("modal_price"),
+            "date": record.get("arrival_date")
+        }
+    else:
+        return {"message": "No data found"}
+
+
+# ==============================
+# 💰 MANDI API ROUTE
+# ==============================
+@app.route("/mandi_price", methods=["GET"])
+def mandi_price():
     try:
-        data = request.json
+        crop = request.args.get("crop")
+        state = request.args.get("state")
 
-        # Step 1: Crop prediction
-        crop_features = [[
-            float(data["N"]),
-            float(data["P"]),
-            float(data["K"]),
-            float(data["temperature"]),
-            float(data["humidity"]),
-            float(data["ph"]),
-            float(data["rainfall"])
-        ]]
+        if not crop or not state:
+            return jsonify({"error": "crop and state required"}), 400
 
-        probs = best_model.predict_proba(crop_features)[0]
-        top_indices = np.argsort(probs)[-1:][::-1]
-        best_crop = le.inverse_transform(top_indices)[0]
+        result = get_mandi_price(crop, state)
 
-        # Step 2: Fertilizer
-        if best_crop not in le_crop.classes_:
-            return jsonify({
-                "best_crop": best_crop,
-                "fertilizer": "Not available"
-            })
-
-        soil = le_soil.transform([data["soil_type"]])[0]
-        crop = le_crop.transform([best_crop])[0]
-
-        fert_features = [[
-            float(data["temperature"]),
-            float(data["humidity"]),
-            float(data.get("moisture", 40)),
-            soil,
-            crop,
-            float(data["N"]),
-            float(data["K"]),
-            float(data["P"])
-        ]]
-
-        fert_pred = fert_model.predict(fert_features)
-        fertilizer = le_fert.inverse_transform(fert_pred)[0]
-
-        return jsonify({
-            "best_crop": best_crop,
-            "recommended_fertilizer": fertilizer
-        })
+        return jsonify(result)
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
 # ==============================
-# RUN
+# 🚀 RUN SERVER
 # ==============================
 if __name__ == "__main__":
     app.run(debug=True)
