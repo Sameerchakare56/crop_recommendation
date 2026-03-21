@@ -3,14 +3,14 @@ import pickle
 import numpy as np
 import requests
 from flask_cors import CORS
-
+import time
 app = Flask(__name__)
 CORS(app)
 
 # ==============================
 # 🔑 API KEY (ONLY ONE PLACE)
 # ==============================
-API_KEY = "YOUR_REAL_API_KEY_HERE"
+API_KEY = "579b464db66ec23bdd0000016020faa1862045c56647000b8d1696f2"
 
 # ==============================
 # LOAD MODELS
@@ -126,35 +126,92 @@ def predict_fertilizer():
 # ==============================
 # 💰 MANDI PRICE FUNCTION
 # ==============================
-def get_mandi_price(crop, state):
+# import requests
+# import time
+
+def get_mandi_price(crop, state, district=None):
     url = "https://api.data.gov.in/resource/9ef84268-d588-465a-a308-a864a43d0070"
 
-    params = {
-        "api-key": API_KEY,
-        "format": "json",
-        "limit": 5,
-        "filters[commodity]": crop,
-        "filters[state]": state
-    }
+    all_records = []
 
-    response = requests.get(url, params=params)
-    data = response.json()
+    # 🔁 Controlled pagination (safe)
+    for offset in range(0, 300, 100):   # 0,100,200
+        try:
+            params = {
+                "api-key": API_KEY,
+                "format": "json",
+                "limit": 100,
+                "offset": offset
+            }
 
-    if "records" in data and len(data["records"]) > 0:
-        record = data["records"][0]
+            response = requests.get(url, params=params, timeout=5)
+            data = response.json()
 
-        return {
-            "crop": record.get("commodity"),
-            "state": record.get("state"),
-            "market": record.get("market"),
-            "min_price": record.get("min_price"),
-            "max_price": record.get("max_price"),
-            "modal_price": record.get("modal_price"),
-            "date": record.get("arrival_date")
-        }
-    else:
+            records = data.get("records", [])
+            if not records:
+                break
+
+            all_records.extend(records)
+
+            time.sleep(1)  # 🔥 avoid API blocking
+
+        except Exception as e:
+            print("API Error:", e)
+            break
+
+    # 🔍 FILTER DATA
+    filtered = []
+
+    for record in all_records:
+        commodity = str(record.get("commodity", "")).lower()
+        state_name = str(record.get("state", "")).lower()
+        district_name = str(record.get("district", "")).lower()
+
+        if crop.lower() in commodity and state.lower() in state_name:
+            if district and district.lower() not in district_name:
+                continue
+
+            try:
+                min_p = float(record.get("min_price", 0))
+                max_p = float(record.get("max_price", 0))
+                modal_p = float(record.get("modal_price", 0))
+            except:
+                continue
+
+            filtered.append({
+                "market": record.get("market"),
+                "district": record.get("district"),
+                "min_price": min_p,
+                "max_price": max_p,
+                "modal_price": modal_p,
+                "date": record.get("arrival_date")
+            })
+
+    if not filtered:
         return {"message": "No data found"}
 
+    # 🔥 FIND BEST & WORST
+    min_record = min(filtered, key=lambda x: x["min_price"])
+    max_record = max(filtered, key=lambda x: x["max_price"])
+
+    return {
+        "crop": crop,
+        "state": state,
+        "district": district,
+        "total_records": len(filtered),
+
+        "lowest_price_mandi": {
+            "market": min_record["market"],
+            "price": min_record["min_price"]
+        },
+
+        "highest_price_mandi": {
+            "market": max_record["market"],
+            "price": max_record["max_price"]
+        },
+
+        "data": filtered[:10]   # preview (top 10)
+    }
 
 # ==============================
 # 💰 MANDI API ROUTE
@@ -164,11 +221,12 @@ def mandi_price():
     try:
         crop = request.args.get("crop")
         state = request.args.get("state")
+        district = request.args.get("district")  # FIXED
 
         if not crop or not state:
             return jsonify({"error": "crop and state required"}), 400
 
-        result = get_mandi_price(crop, state)
+        result = get_mandi_price(crop, state, district)
 
         return jsonify(result)
 
